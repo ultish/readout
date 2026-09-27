@@ -1,0 +1,18 @@
+{
+  "name": "readout",
+  "version": "0.1.0",
+  "private": true,
+  "description": "English hazard map for urban Japan property",
+  "scripts": {
+    "dev": "pnpm --filter @readout/core build && pnpm -r --parallel --filter @readout/core --filter @readout/api --filter @readout/web dev",
+    "dev:api": "pnpm --filter @readout/api dev",
+    "dev:web": "pnpm --filter @readout/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.5.0"
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@readout/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8791",
+    "db:migrate": "wrangler d1 migrations apply readout --local",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@readout/core": "workspace:*",
+    "fflate": "^0.8.2",
+    "hono": "^4.7.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260927.1",
+    "typescript": "^5.8.2",
+    "wrangler": "^4.40.0"
+  }
+}
