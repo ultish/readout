@@ -68,7 +68,6 @@ export default function App() {
   const [showSaved, setShowSaved] = useState(false);
   const [saveNote, setSaveNote] = useState<string | null>(null);
   const [locationNote, setLocationNote] = useState<string | null>(null);
-  const [detailsOpen, setDetailsOpen] = useState(false);
 
   useQuakeOverlay(mapRef, ready, layers.quake);
 
@@ -94,7 +93,6 @@ export default function App() {
   const openPoint = useCallback(async (lat: number, lon: number) => {
     setPin({ lat, lon });
     setShowSaved(false);
-    setDetailsOpen(false);
     setLoading(true);
     setReportError(null);
     setSaveNote(null);
@@ -161,7 +159,6 @@ export default function App() {
     setReportError(null);
     setLoading(false);
     setShowSaved(false);
-    setDetailsOpen(false);
   }
 
   function onClick(event: MapLayerMouseEvent) {
@@ -399,15 +396,6 @@ export default function App() {
                 <span>Flood, assumed maximum</span>
                 <strong className={report.flood.inZone ? "in" : undefined}>{report.flood.label}</strong>
               </div>
-              <button
-                type="button"
-                className="sheet-toggle"
-                aria-expanded={detailsOpen}
-                onClick={() => setDetailsOpen((open) => !open)}
-              >
-                {detailsOpen ? "Hide details" : "Show details"}
-              </button>
-              <div className={detailsOpen ? "sheet-extra open" : "sheet-extra"}>
               <p className="muted">
                 {report.lat.toFixed(5)}, {report.lon.toFixed(5)}
                 {report.quake.meshcode ? ` · mesh ${report.quake.meshcode}` : ""}
@@ -475,7 +463,6 @@ export default function App() {
               <p className="sources">
                 Sources: {report.sources.map((source) => source.name).join(", ")}.
               </p>
-              </div>
             </>
           )}
         </aside>

@@ -218,15 +218,6 @@ button {
   flex: 1;
 }
 
-.sheet-toggle {
-  width: 100%;
-  min-height: 44px;
-  margin-top: 8px;
-  border: 1px solid var(--line);
-  background: var(--field);
-  font-weight: 700;
-}
-
 .dock h1,
 .place-name {
   font-family: var(--display);
@@ -371,12 +362,6 @@ th {
   border: 1px solid var(--line);
 }
 
-@media (min-width: 721px) {
-  .sheet-toggle {
-    display: none;
-  }
-}
-
 @media (max-width: 720px) {
   .search-stack,
   .layers {
@@ -401,14 +386,6 @@ th {
 
   .dock .place-name {
     font-size: 1.15rem;
-  }
-
-  .sheet-extra {
-    display: none;
-  }
-
-  .sheet-extra.open {
-    display: block;
   }
 }
 
