@@ -4,7 +4,6 @@ import {
   FLOOD_L2,
   GSI_PALE,
   LANDSLIDE_ZONE,
-  SEISMIC_LEGEND,
   STEEP_SLOPE,
   TSUNAMI,
 } from "@readout/core";
@@ -18,8 +17,33 @@ import Map, {
   type MapRef,
 } from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { deletePlace, fetchPlaces, fetchReadout, savePlace, searchAddress } from "./api";
+import {
+  currentUser,
+  deletePlace,
+  fetchPlaces,
+  fetchReadout,
+  loginOptions,
+  loginVerify,
+  logout,
+  registerOptions,
+  registerVerify,
+  savePlace,
+  searchAddress,
+} from "./api";
+import {
+  coarseNotes,
+  depthLabel,
+  initialLang,
+  landslideLine,
+  messages,
+  storedDepth,
+  storedEra,
+  type Lang,
+} from "./copy";
 import type { GeocodeHit, Readout, SavedPlace } from "./types";
+import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
+import type { AuthenticationResponseJSON, PublicKeyCredentialRequestOptionsJSON, PublicKeyCredentialCreationOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/browser";
+import { gsiTileUrl } from "./hazardTiles";
 import { startTour, startTourIfNew } from "./tour";
 import { useQuakeOverlay } from "./useQuakeOverlay";
 
@@ -36,16 +60,6 @@ const EMPTY_STYLE = {
 };
 
 type LayerId = "flood" | "tsunami" | "landslide" | "quake";
-
-function flagText(flag: Readout["landslide"]["debrisFlow"]): string {
-  if (flag.status !== "ok") return "no tile";
-  return flag.inZone ? "in the zone" : "not coloured";
-}
-
-function landslideText(report: Readout): string {
-  const { debrisFlow, steepSlope, landslide } = report.landslide;
-  return `Debris flow ${flagText(debrisFlow)}. Steep slope ${flagText(steepSlope)}. Landslide ${flagText(landslide)}.`;
-}
 
 export default function App() {
   const mapRef = useRef<MapRef>(null);
@@ -68,16 +82,48 @@ export default function App() {
   const [showSaved, setShowSaved] = useState(false);
   const [saveNote, setSaveNote] = useState<string | null>(null);
   const [locationNote, setLocationNote] = useState<string | null>(null);
+  const [lang, setLang] = useState<Lang>(initialLang);
+  const t = messages(lang);
+  const [user, setUser] = useState<{ email: string } | null>(null);
+  const [authName, setAuthName] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useQuakeOverlay(mapRef, ready, layers.quake);
+
+  useEffect(() => {
+    document.documentElement.lang = lang === "ja" ? "ja" : "en-AU";
+    try {
+      localStorage.setItem("readout-lang", lang);
+    } catch {
+      /* private mode */
+    }
+  }, [lang]);
 
   const loadPlaces = useCallback(async () => {
     setPlaces(await fetchPlaces());
   }, []);
 
   useEffect(() => {
+    let gone = false;
+    void currentUser()
+      .then((person) => {
+        if (!gone) setUser(person);
+      })
+      .catch(() => {
+        if (!gone) setUser(null);
+      });
+    return () => {
+      gone = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setPlaces([]);
+      return;
+    }
     void loadPlaces().catch(() => setPlaces([]));
-  }, [loadPlaces]);
+  }, [user, loadPlaces]);
 
   const fly = useCallback((lat: number, lon: number, zoom?: number) => {
     const map = mapRef.current?.getMap();
@@ -88,23 +134,25 @@ export default function App() {
       zoom: nextZoom,
       duration: reduce ? 0 : 700,
     });
+    return nextZoom;
   }, []);
 
-  const openPoint = useCallback(async (lat: number, lon: number) => {
+  const openPoint = useCallback(async (lat: number, lon: number, cameraZoom?: number) => {
+    const zoom = cameraZoom ?? mapRef.current?.getMap()?.getZoom() ?? 14;
     setPin({ lat, lon });
     setShowSaved(false);
     setLoading(true);
     setReportError(null);
     setSaveNote(null);
     try {
-      setReport(await fetchReadout(lat, lon));
+      setReport(await fetchReadout(lat, lon, zoom));
     } catch (err) {
       setReport(null);
-      setReportError(err instanceof Error ? err.message : "Readout failed");
+      setReportError(err instanceof Error ? err.message : t.readoutFailed);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!ready) return;
@@ -115,42 +163,42 @@ export default function App() {
     const lat = Number(latParam);
     const lon = Number(lonParam);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-    fly(lat, lon);
-    void openPoint(lat, lon);
+    const zoom = fly(lat, lon);
+    void openPoint(lat, lon, zoom);
   }, [ready, fly, openPoint]);
 
   useEffect(() => {
     if (!ready) return;
     if (new URLSearchParams(window.location.search).has("lat")) return;
-    const timer = window.setTimeout(startTourIfNew, 400);
+    const timer = window.setTimeout(() => startTourIfNew(lang), 400);
     return () => window.clearTimeout(timer);
-  }, [ready]);
+  }, [ready, lang]);
 
   async function onSearch(event: React.FormEvent) {
     event.preventDefault();
     setSearchError(null);
     setHits([]);
     if (!query.trim()) {
-      setSearchError("Type a city or an address.");
+      setSearchError(t.emptySearch);
       return;
     }
     try {
       const results = await searchAddress(query);
       if (results.length === 0) {
-        setSearchError("No place matched that.");
+        setSearchError(t.noMatch);
         return;
       }
       const first = results[0];
       if (!first) return;
       if (results.length === 1) {
-        fly(first.lat, first.lon, first.zoom);
-        void openPoint(first.lat, first.lon);
+        const zoom = fly(first.lat, first.lon, first.zoom);
+        void openPoint(first.lat, first.lon, zoom);
         return;
       }
       setHits(results);
       fly(first.lat, first.lon, first.zoom);
     } catch (err) {
-      setSearchError(err instanceof Error ? err.message : "Search failed");
+      setSearchError(err instanceof Error ? err.message : t.searchFailed);
     }
   }
 
@@ -162,12 +210,12 @@ export default function App() {
   }
 
   function onClick(event: MapLayerMouseEvent) {
-    void openPoint(event.lngLat.lat, event.lngLat.lng);
+    void openPoint(event.lngLat.lat, event.lngLat.lng, event.target.getZoom());
   }
 
   function locateMe() {
     if (!navigator.geolocation) {
-      setLocationNote("This browser did not share a location.");
+      setLocationNote(t.noLocation);
       return;
     }
     setLocationNote(null);
@@ -183,7 +231,7 @@ export default function App() {
         });
         setPin({ lat, lon });
       },
-      () => setLocationNote("This browser did not share a location."),
+      () => setLocationNote(t.noLocation),
       { enableHighAccuracy: true, timeout: 10000 },
     );
   }
@@ -198,6 +246,10 @@ export default function App() {
 
   async function onSave() {
     if (!report) return;
+    if (!user) {
+      setShowSaved(true);
+      return;
+    }
     try {
       await savePlace({
         label: report.placeName ?? `${report.lat.toFixed(4)}, ${report.lon.toFixed(4)}`,
@@ -208,13 +260,18 @@ export default function App() {
         quakeLabel: report.quake.label,
         floodLabel: report.flood.label,
         tsunamiLabel: report.tsunami.label,
-        landslideLabel: landslideText(report),
+        landslideLabel: landslideLine(
+          report.landslide.debrisFlow,
+          report.landslide.steepSlope,
+          report.landslide.landslide,
+          t,
+        ),
         report,
       });
-      setSaveNote("Saved");
+      setSaveNote(t.savedNote);
       await loadPlaces();
     } catch (err) {
-      setSaveNote(err instanceof Error ? err.message : "Could not save");
+      setSaveNote(err instanceof Error ? err.message : t.saveFailed);
     }
   }
 
@@ -236,7 +293,7 @@ export default function App() {
           type="raster"
           tiles={[GSI_PALE]}
           tileSize={256}
-          attribution="Geospatial Information Authority of Japan. Quake layer: J-SHIS. Address search: HeartRails"
+          attribution={t.attribution}
         />
         <Layer id="pale" type="raster" source="pale" />
         <Source id="flood" type="raster" tiles={[FLOOD_L2]} tileSize={256} maxzoom={17} />
@@ -255,7 +312,7 @@ export default function App() {
           paint={{ "raster-opacity": 0.72 }}
           layout={{ visibility: layers.tsunami ? "visible" : "none" }}
         />
-        <Source id="debris" type="raster" tiles={[DEBRIS_FLOW]} tileSize={256} maxzoom={17} />
+        <Source id="debris" type="raster" tiles={[gsiTileUrl(DEBRIS_FLOW)]} tileSize={256} maxzoom={17} />
         <Layer
           id="debris"
           type="raster"
@@ -263,7 +320,7 @@ export default function App() {
           paint={{ "raster-opacity": 0.75 }}
           layout={{ visibility: layers.landslide ? "visible" : "none" }}
         />
-        <Source id="steep" type="raster" tiles={[STEEP_SLOPE]} tileSize={256} maxzoom={17} />
+        <Source id="steep" type="raster" tiles={[gsiTileUrl(STEEP_SLOPE)]} tileSize={256} maxzoom={17} />
         <Layer
           id="steep"
           type="raster"
@@ -271,7 +328,7 @@ export default function App() {
           paint={{ "raster-opacity": 0.75 }}
           layout={{ visibility: layers.landslide ? "visible" : "none" }}
         />
-        <Source id="slide" type="raster" tiles={[LANDSLIDE_ZONE]} tileSize={256} maxzoom={17} />
+        <Source id="slide" type="raster" tiles={[gsiTileUrl(LANDSLIDE_ZONE)]} tileSize={256} maxzoom={17} />
         <Layer
           id="slide"
           type="raster"
@@ -289,46 +346,52 @@ export default function App() {
       </div>
 
       <div className="topbar">
-        <div className="search-stack">
-        <form id="address-search" className="search" onSubmit={(event) => void onSearch(event)}>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Sapporo, 札幌, or an address"
-            aria-label="Address"
-          />
-          <button type="submit">Go</button>
-          {hits.length > 1 && (
-            <ul className="hits">
-              {hits.map((hit) => (
-                <li key={`${hit.lon},${hit.lat},${hit.label}`}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setHits([]);
-                      fly(hit.lat, hit.lon, hit.zoom);
-                      void openPoint(hit.lat, hit.lon);
-                    }}
-                  >
-                    {hit.label}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </form>
-        <button type="button" className="locate" onClick={locateMe}>
-          Use my location
-        </button>
+        <div className="search-row">
+          <form id="address-search" className="search" onSubmit={(event) => void onSearch(event)}>
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={t.placeholder}
+              aria-label={t.address}
+            />
+            <button type="submit">{t.go}</button>
+            {hits.length > 1 && (
+              <ul className="hits">
+                {hits.map((hit) => (
+                  <li key={`${hit.lon},${hit.lat},${hit.label}`}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHits([]);
+                        const zoom = fly(hit.lat, hit.lon, hit.zoom);
+                        void openPoint(hit.lat, hit.lon, zoom);
+                      }}
+                    >
+                      {hit.label}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </form>
+          <button
+            type="button"
+            className="locate-icon"
+            onClick={locateMe}
+            aria-label={t.useLocation}
+            title={t.useLocation}
+          >
+            <LocateIcon />
+          </button>
         </div>
         <div className="layers">
-          <div id="map-layers" role="group" aria-label="Map layers">
+          <div id="map-layers" role="group" aria-label={t.layersLabel}>
             {(
               [
-                ["flood", "Flood"],
-                ["tsunami", "Tsunami"],
-                ["landslide", "Landslide"],
-                ["quake", "Quake"],
+                ["flood", t.flood],
+                ["tsunami", t.tsunami],
+                ["landslide", t.landslide],
+                ["quake", t.quake],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -351,117 +414,167 @@ export default function App() {
               setShowSaved((open) => !open);
             }}
           >
-            Saved
+            {t.saved}
           </button>
-          <button type="button" className="chip" onClick={() => startTour()}>
-            Tour
+          <button type="button" className="chip" onClick={() => startTour(lang)}>
+            {t.tour}
           </button>
         </div>
+        <div className="lang" role="group" aria-label={t.langLabel}>
+          <button type="button" aria-pressed={lang === "en"} onClick={() => setLang("en")}>
+            English
+          </button>
+          <button type="button" aria-pressed={lang === "ja"} onClick={() => setLang("ja")}>
+            日本語
+          </button>
+        </div>
+        {searchError && <p className="search-error">{searchError}</p>}
+        {locationNote && <p className="search-error">{locationNote}</p>}
       </div>
-
-      {searchError && <p className="search-error">{searchError}</p>}
-      {locationNote && <p className="search-error">{locationNote}</p>}
 
       {dockOpen && (
         <aside className="dock">
           <div className="sheet-head">
-            <span className="muted">{showSaved ? "Saved places" : "This spot"}</span>
+            <span className="muted">{showSaved ? t.savedPlaces : t.thisSpot}</span>
             <button type="button" className="text-button" onClick={closeDock}>
-              Close
+              {t.close}
             </button>
           </div>
-          {loading && <p>Reading this point…</p>}
+          {loading && <p>{t.reading}</p>}
           {reportError && <p>{reportError}</p>}
-          {showSaved && (
-            <SavedTable
-              places={places}
-              onOpen={(place) => {
-                fly(place.lat, place.lon);
-                void openPoint(place.lat, place.lon);
+          {showSaved && !user && (
+            <SignIn
+              t={t}
+              name={authName}
+              error={authError}
+              onName={setAuthName}
+              onSignedIn={(person) => {
+                setUser(person);
+                setAuthError(null);
+                if (report) setShowSaved(false);
               }}
-              onDelete={async (id) => {
-                await deletePlace(id);
-                await loadPlaces();
-              }}
+              onFail={() => setAuthError(t.passkeyFailed)}
             />
+          )}
+          {showSaved && user && (
+            <>
+              <div className="account">
+                <p>
+                  <span className="muted">{t.signedInAs}</span> {user.email}
+                </p>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => {
+                    void logout().then(() => {
+                      setUser(null);
+                      setPlaces([]);
+                    });
+                  }}
+                >
+                  {t.signOut}
+                </button>
+              </div>
+              <SavedTable
+                t={t}
+                places={places}
+                onOpen={(place) => {
+                  const zoom = fly(place.lat, place.lon);
+                  void openPoint(place.lat, place.lon, zoom);
+                }}
+                onDelete={async (id) => {
+                  await deletePlace(id);
+                  await loadPlaces();
+                }}
+              />
+            </>
           )}
           {report && !showSaved && (
             <>
-              <p className="place-name">{report.placeName ?? "Clicked point"}</p>
+              <p className="place-name">{report.placeName ?? t.clickedPoint}</p>
               <p className={report.quake.probability != null && report.quake.probability >= 0.06 ? "quake-number in" : "quake-number"}>
                 {report.quake.label}
               </p>
-              <p>{report.quake.title}</p>
+              <p>{t.quakeTitle}</p>
               <div className="row">
-                <span>Flood, assumed maximum</span>
-                <strong className={report.flood.inZone ? "in" : undefined}>{report.flood.label}</strong>
+                <span>{t.floodRow}</span>
+                <strong className={report.flood.inZone ? "in" : undefined}>{depthLabel(report.flood, t)}</strong>
               </div>
               <p className="muted">
                 {report.lat.toFixed(5)}, {report.lon.toFixed(5)}
-                {report.quake.meshcode ? ` · mesh ${report.quake.meshcode}` : ""}
+                {report.quake.meshcode ? ` · ${t.mesh} ${report.quake.meshcode}` : ""}
               </p>
-              <p className="caveat">{report.flood.caveat}</p>
+              <p className="caveat">{t.floodCaveat}</p>
+              {coarseNotes(report.flood.caveats, t).map((line) => (
+                <p className="caveat" key={line}>{line}</p>
+              ))}
               <div className="row">
-                <span>Tsunami</span>
-                <strong className={report.tsunami.inZone ? "in" : undefined}>{report.tsunami.label}</strong>
+                <span>{t.tsunamiRow}</span>
+                <strong className={report.tsunami.inZone ? "in" : undefined}>{depthLabel(report.tsunami, t)}</strong>
               </div>
               <div className="row">
-                <span>Landslide</span>
-                <strong className={report.landslide.inAny ? "in" : undefined}>{landslideText(report)}</strong>
+                <span>{t.landslideRow}</span>
+                <strong className={report.landslide.inAny ? "in" : undefined}>
+                  {landslideLine(
+                    report.landslide.debrisFlow,
+                    report.landslide.steepSlope,
+                    report.landslide.landslide,
+                    t,
+                  )}
+                </strong>
               </div>
-              {[report.landslide.debrisFlow, report.landslide.steepSlope, report.landslide.landslide]
-                .flatMap((flag) => flag.caveats)
-                .filter((line, index, all) => all.indexOf(line) === index)
-                .map((line) => (
-                  <p className="caveat" key={line}>{line}</p>
-                ))}
               <div className="row">
-                <span>Ground</span>
+                <span>{t.ground}</span>
                 <strong>
-                  {report.softGround.soilEn ?? report.softGround.soilJa ?? report.softGround.caveats[0]}
+                  {(lang === "ja" ? report.softGround.soilJa : report.softGround.soilEn) ??
+                    report.softGround.soilJa ??
+                    report.softGround.soilEn}
                 </strong>
               </div>
               {report.softGround.avs && (
                 <p className="muted">
-                  AVS {report.softGround.avs} m/s
-                  {report.softGround.arv ? ` · amplification ${report.softGround.arv}` : ""}
+                  {t.avs} {report.softGround.avs} m/s
+                  {report.softGround.arv ? ` · ${t.amplification} ${report.softGround.arv}` : ""}
                 </p>
               )}
-              {report.softGround.caveats.map((line) => (
-                <p className="caveat" key={line}>{line}</p>
-              ))}
+              <p className="caveat">{t.notLiquefaction}</p>
+              {lang === "en" && report.softGround.soilJa && !report.softGround.soilEn && (
+                <p className="caveat">{t.untranslated(report.softGround.soilJa)}</p>
+              )}
               <div className="row">
-                <span>Liquefaction</span>
-                <strong>{report.liquefaction.label}</strong>
+                <span>{t.liquefaction}</span>
+                <strong>{t.noLiquefactionTile}</strong>
               </div>
+              <p className="caveat">{t.liquefactionNote}</p>
               <label className="year">
-                Year built
+                {t.yearBuilt}
                 <input
                   inputMode="numeric"
                   value={year}
                   onChange={(event) => setYear(event.target.value)}
-                  placeholder="optional"
+                  placeholder={t.optional}
                 />
               </label>
               <ul className="era-legend">
-                {SEISMIC_LEGEND.map((item) => (
-                  <li key={item.era} className={era?.era === item.era ? "current" : undefined}>
-                    <strong>{item.label}</strong>
-                    <span className="muted">{item.years}</span>
-                    <span>{item.description}</span>
+                {(Object.keys(t.era) as Array<keyof typeof t.era>).map((key) => (
+                  <li key={key} className={era?.era === key ? "current" : undefined}>
+                    <strong>{t.era[key].label}</strong>
+                    <span className="muted">{t.era[key].years}</span>
+                    <span>{t.era[key].description}</span>
                   </li>
                 ))}
               </ul>
-              {era?.caveats[0] && <p className="caveat">{era.caveats[0]}</p>}
+              {yearNumber === 1981 && <p className="caveat">{t.caveat1981}</p>}
+              {yearNumber === 2000 && <p className="caveat">{t.caveat2000}</p>}
               <div className="actions">
                 <button type="button" className="text-button" onClick={() => void onSave()}>
-                  Save place
+                  {t.savePlace}
                 </button>
                 {saveNote && <span>{saveNote}</span>}
               </div>
-              <p className="disclaimer">{report.disclaimer}</p>
+              <p className="disclaimer">{t.disclaimer}</p>
               <p className="sources">
-                Sources: {report.sources.map((source) => source.name).join(", ")}.
+                {t.sources}: {report.sources.map((source) => source.name).join(", ")}.
               </p>
             </>
           )}
@@ -472,47 +585,111 @@ export default function App() {
   );
 }
 
+function LocateIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="2.4" fill="currentColor" />
+      <circle cx="12" cy="12" r="6.15" fill="none" stroke="currentColor" strokeWidth="1.75" />
+      <path
+        d="M12 1.5V7.2M12 16.8V22.5M1.5 12H7.2M16.8 12H22.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.75"
+      />
+    </svg>
+  );
+}
+
+function SignIn({
+  t,
+  name,
+  error,
+  onName,
+  onSignedIn,
+  onFail,
+}: {
+  t: ReturnType<typeof messages>;
+  name: string;
+  error: string | null;
+  onName: (value: string) => void;
+  onSignedIn: (user: { email: string }) => void;
+  onFail: () => void;
+}) {
+  async function create() {
+    try {
+      const options = await registerOptions(name.trim() || "Readout");
+      const attestation = await startRegistration({
+        optionsJSON: options as unknown as PublicKeyCredentialCreationOptionsJSON,
+      });
+      const result = await registerVerify(attestation as RegistrationResponseJSON);
+      onSignedIn(result.user);
+    } catch {
+      onFail();
+    }
+  }
+
+  async function existing() {
+    try {
+      const options = await loginOptions();
+      const assertion = await startAuthentication({
+        optionsJSON: options as unknown as PublicKeyCredentialRequestOptionsJSON,
+      });
+      const result = await loginVerify(assertion as AuthenticationResponseJSON);
+      onSignedIn(result.user);
+    } catch {
+      onFail();
+    }
+  }
+
+  return (
+    <div className="sign-in">
+      <p>{t.signInHint}</p>
+      <label className="sign-field">
+        {t.signInName}
+        <input value={name} onChange={(event) => onName(event.target.value)} placeholder="you@example.com" />
+      </label>
+      <button type="button" className="locate" onClick={() => void create()}>
+        {t.createSignIn}
+      </button>
+      <button type="button" className="text-button" onClick={() => void existing()}>
+        {t.useExisting}
+      </button>
+      {error && <p className="sign-error" role="alert">{error}</p>}
+    </div>
+  );
+}
+
 function SavedTable({
+  t,
   places,
   onOpen,
   onDelete,
 }: {
+  t: ReturnType<typeof messages>;
   places: SavedPlace[];
   onOpen: (place: SavedPlace) => void;
   onDelete: (id: string) => Promise<void>;
 }) {
-  if (places.length === 0) return <p>No places saved yet.</p>;
+  if (places.length === 0) return <p className="empty-places">{t.noPlaces}</p>;
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Place</th>
-          <th>Quake</th>
-          <th>Flood</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {places.map((place) => (
-          <tr key={place.id}>
-            <td>
-              <button type="button" className="place-link" onClick={() => onOpen(place)}>
-                {place.label}
-              </button>
-              <div className="muted">{place.tsunami_label}</div>
-              <div className="muted">{place.landslide_label}</div>
-              {place.era && <div className="muted">{place.era}</div>}
-            </td>
-            <td>{place.quake_label}</td>
-            <td>{place.flood_label}</td>
-            <td>
-              <button type="button" className="text-button" onClick={() => void onDelete(place.id)}>
-                Remove
-              </button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <ul className="saved-list">
+      {places.map((place) => (
+        <li key={place.id} className="saved-place">
+          <button type="button" className="place-link" onClick={() => onOpen(place)}>
+            {place.label}
+          </button>
+          <button type="button" className="text-button" onClick={() => void onDelete(place.id)}>
+            {t.remove}
+          </button>
+          <div className="saved-facts">
+            <span><b>{t.quake}</b> {place.quake_label}</span>
+            <span><b>{t.flood}</b> {storedDepth(place.flood_label, t)}</span>
+            <span><b>{t.tsunami}</b> {storedDepth(place.tsunami_label, t)}</span>
+            {place.landslide_label && <span>{place.landslide_label}</span>}
+            {place.era && <span>{storedEra(place.era, t)}</span>}
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }

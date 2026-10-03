@@ -5,4 +5,5 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 .wrangler
+.dev.vars
 .DS_Store

@@ -36,5 +36,3 @@ export const JSHIS_WMS =
   "https://www.j-shis.bosai.go.jp/map/wms/pshm/Y2024";
 
 export const HEART_RAILS = "https://geoapi.heartrails.com/api/json";
-
-export const SAMPLE_ZOOMS = [16, 15, 14, 13, 12, 11, 10, 9, 8] as const;

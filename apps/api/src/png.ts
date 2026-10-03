@@ -28,8 +28,14 @@ function paeth(a: number, b: number, c: number): number {
   return c;
 }
 
-/** RGBA at one pixel. GSI hazard tiles are non-interlaced 8-bit PNG. */
-export function pngPixel(data: Uint8Array, x: number, y: number): Rgba {
+export interface PngImage {
+  width: number;
+  height: number;
+  rgba: Uint8Array;
+}
+
+/** Full RGBA image. GSI hazard tiles are non-interlaced 8-bit PNG. */
+export function pngImage(data: Uint8Array): PngImage {
   if (!PNG_SIG.every((byte, i) => data[i] === byte)) {
     throw new Error("Not a PNG");
   }
@@ -61,9 +67,6 @@ export function pngPixel(data: Uint8Array, x: number, y: number): Rgba {
   }
   const bpp = color === 6 ? 4 : color === 2 ? 3 : 0;
   if (!bpp) throw new Error(`PNG colour type ${color}`);
-  if (x < 0 || y < 0 || x >= width || y >= height) {
-    throw new Error("Pixel outside tile");
-  }
   const merged = new Uint8Array(idat.reduce((n, chunk) => n + chunk.length, 0));
   let offset = 0;
   for (const chunk of idat) {
@@ -72,10 +75,11 @@ export function pngPixel(data: Uint8Array, x: number, y: number): Rgba {
   }
   const raw = unzlibSync(merged);
   const stride = width * bpp;
+  const out = new Uint8Array(width * height * 4);
   let i = 0;
   let prev = new Uint8Array(stride);
   let row = new Uint8Array(stride);
-  for (let yy = 0; yy <= y; yy++) {
+  for (let yy = 0; yy < height; yy++) {
     const filter = raw[i] ?? 0;
     i += 1;
     row = raw.subarray(i, i + stride);
@@ -108,10 +112,29 @@ export function pngPixel(data: Uint8Array, x: number, y: number): Rgba {
       throw new Error(`PNG filter ${filter}`);
     }
     prev = row;
+    for (let x = 0; x < width; x++) {
+      const source = x * bpp;
+      const target = (yy * width + x) * 4;
+      out[target] = row[source] ?? 0;
+      out[target + 1] = row[source + 1] ?? 0;
+      out[target + 2] = row[source + 2] ?? 0;
+      out[target + 3] = bpp === 4 ? (row[source + 3] ?? 0) : 255;
+    }
   }
-  const o = x * bpp;
-  if (bpp === 4) {
-    return { r: row[o] ?? 0, g: row[o + 1] ?? 0, b: row[o + 2] ?? 0, a: row[o + 3] ?? 0 };
+  return { width, height, rgba: out };
+}
+
+/** RGBA at one pixel. GSI hazard tiles are non-interlaced 8-bit PNG. */
+export function pngPixel(data: Uint8Array, x: number, y: number): Rgba {
+  const image = pngImage(data);
+  if (x < 0 || y < 0 || x >= image.width || y >= image.height) {
+    throw new Error("Pixel outside tile");
   }
-  return { r: row[o] ?? 0, g: row[o + 1] ?? 0, b: row[o + 2] ?? 0, a: 255 };
+  const o = (y * image.width + x) * 4;
+  return {
+    r: image.rgba[o] ?? 0,
+    g: image.rgba[o + 1] ?? 0,
+    b: image.rgba[o + 2] ?? 0,
+    a: image.rgba[o + 3] ?? 0,
+  };
 }

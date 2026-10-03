@@ -4,16 +4,29 @@ import {
   FLOOD_L2,
   LANDSLIDE_ZONE,
   parseLatLon,
+  rasterTileZoom,
   STEEP_SLOPE,
   TSUNAMI,
 } from "@readout/core";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
+import {
+  loginOptions,
+  loginVerify,
+  registrationOptions,
+  registrationVerify,
+  requestOrigin,
+  sessionCookie,
+  sessionToken,
+  userIdFromCookie,
+} from "./auth.js";
 import { sampleDepth, sampleFlag } from "./sample.js";
 import { geocode, quakeAt, quakeOverlayUrl, reverseTown, soilAt } from "./upstream.js";
 
 type Bindings = {
   DB: D1Database;
+  SESSION_SECRET?: string;
 };
 
 interface PlaceRow {
@@ -72,17 +85,24 @@ app.get("/api/readout", async (c) => {
   if (lat < 20 || lat > 50 || lon < 122 || lon > 154) {
     return c.json({ error: "Point is outside Japan" }, 400);
   }
+  const zoomQuery = c.req.query("zoom");
+  let cameraZoom = 15;
+  if (zoomQuery != null && zoomQuery !== "") {
+    cameraZoom = Number(zoomQuery);
+    if (!Number.isFinite(cameraZoom)) return c.json({ error: "zoom must be a number" }, 400);
+  }
+  const tileZoom = rasterTileZoom(cameraZoom);
   try {
     const [placeName, quake, soil, flood, tsunami, debris, steep, slide] =
       await Promise.all([
         reverseTown(lat, lon),
         quakeAt(lat, lon),
         soilAt(lat, lon),
-        sampleDepth(FLOOD_L2, lat, lon),
-        sampleDepth(TSUNAMI, lat, lon),
-        sampleFlag(DEBRIS_FLOW, lat, lon),
-        sampleFlag(STEEP_SLOPE, lat, lon),
-        sampleFlag(LANDSLIDE_ZONE, lat, lon),
+        sampleDepth(FLOOD_L2, lat, lon, tileZoom),
+        sampleDepth(TSUNAMI, lat, lon, tileZoom),
+        sampleFlag(DEBRIS_FLOW, lat, lon, "debris", tileZoom),
+        sampleFlag(STEEP_SLOPE, lat, lon, "steep", tileZoom),
+        sampleFlag(LANDSLIDE_ZONE, lat, lon, "slide", tileZoom),
       ]);
     const landslideIn = [debris, steep, slide].some((f) => f.inZone === true);
     const landslideKnown = [debris, steep, slide].every((f) => f.status === "ok");
@@ -168,10 +188,78 @@ app.get("/api/quake-overlay", async (c) => {
   return response;
 });
 
+async function currentUser(c: { env: Bindings; req: { header: (name: string) => string | undefined } }) {
+  const userId = await userIdFromCookie(c.req.header("cookie"), c.env.SESSION_SECRET);
+  if (!userId) return null;
+  return c.env.DB.prepare("SELECT id, email FROM users WHERE id = ?")
+    .bind(userId)
+    .first<{ id: string; email: string }>();
+}
+
+app.get("/api/auth/me", async (c) => {
+  const user = await currentUser(c);
+  if (!user) return c.json({ user: null }, 401);
+  return c.json({ user: { email: user.email } });
+});
+
+app.post("/api/auth/register/options", async (c) => {
+  if (!c.env.SESSION_SECRET) return c.json({ error: "Sign-in is not configured" }, 500);
+  const origin = requestOrigin(c.req.header("origin"), c.req.url);
+  if (!origin) return c.json({ error: "Origin is not allowed" }, 400);
+  const body = (await c.req.json()) as { email?: string };
+  const email = body.email?.trim() ?? "";
+  if (!email || email.length > 200) return c.json({ error: "Enter a name for this sign-in" }, 400);
+  const options = await registrationOptions(c.env.DB, origin, email);
+  return c.json(options);
+});
+
+app.post("/api/auth/register/verify", async (c) => {
+  const secret = c.env.SESSION_SECRET;
+  if (!secret) return c.json({ error: "Sign-in is not configured" }, 500);
+  const origin = requestOrigin(c.req.header("origin"), c.req.url);
+  if (!origin) return c.json({ error: "Origin is not allowed" }, 400);
+  const response = (await c.req.json()) as RegistrationResponseJSON;
+  const user = await registrationVerify(c.env.DB, origin, response);
+  if (!user) return c.json({ error: "Sign-in could not be created" }, 400);
+  const token = await sessionToken(secret, user.userId);
+  c.header("Set-Cookie", sessionCookie(token, origin.startsWith("https:")));
+  return c.json({ user: { email: user.email } });
+});
+
+app.post("/api/auth/login/options", async (c) => {
+  if (!c.env.SESSION_SECRET) return c.json({ error: "Sign-in is not configured" }, 500);
+  const origin = requestOrigin(c.req.header("origin"), c.req.url);
+  if (!origin) return c.json({ error: "Origin is not allowed" }, 400);
+  return c.json(await loginOptions(c.env.DB, origin));
+});
+
+app.post("/api/auth/login/verify", async (c) => {
+  const secret = c.env.SESSION_SECRET;
+  if (!secret) return c.json({ error: "Sign-in is not configured" }, 500);
+  const origin = requestOrigin(c.req.header("origin"), c.req.url);
+  if (!origin) return c.json({ error: "Origin is not allowed" }, 400);
+  const response = (await c.req.json()) as AuthenticationResponseJSON;
+  const user = await loginVerify(c.env.DB, origin, response);
+  if (!user) return c.json({ error: "Sign-in failed" }, 401);
+  const token = await sessionToken(secret, user.id);
+  c.header("Set-Cookie", sessionCookie(token, origin.startsWith("https:")));
+  return c.json({ user: { email: user.email } });
+});
+
+app.post("/api/auth/logout", async (c) => {
+  const origin = requestOrigin(c.req.header("origin"), c.req.url);
+  c.header("Set-Cookie", sessionCookie("", origin?.startsWith("https:") ?? true, true));
+  return c.json({ ok: true });
+});
+
 app.get("/api/places", async (c) => {
+  const user = await currentUser(c);
+  if (!user) return c.json({ error: "Sign in" }, 401);
   const { results } = await c.env.DB.prepare(
-    "SELECT * FROM places ORDER BY created_at DESC",
-  ).all<PlaceRow>();
+    "SELECT * FROM places WHERE owner_id = ? ORDER BY created_at DESC",
+  )
+    .bind(user.id)
+    .all<PlaceRow>();
   return c.json({ places: results });
 });
 
@@ -193,14 +281,16 @@ app.post("/api/places", async (c) => {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
     return c.json({ error: "lat and lon are required" }, 400);
   }
+  const user = await currentUser(c);
+  if (!user) return c.json({ error: "Sign in" }, 401);
   const year = body.yearBuilt ?? null;
   const era = year != null && Number.isFinite(year) ? eraFromYear(year) : null;
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
     `INSERT INTO places (
       id, label, address, lat, lon, year_built, quake_label, flood_label,
-      tsunami_label, landslide_label, era, report_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      tsunami_label, landslide_label, era, report_json, owner_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -215,16 +305,21 @@ app.post("/api/places", async (c) => {
       body.landslideLabel ?? null,
       era?.label ?? null,
       JSON.stringify(body.report ?? {}),
+      user.id,
     )
     .run();
-  const row = await c.env.DB.prepare("SELECT * FROM places WHERE id = ?")
-    .bind(id)
+  const row = await c.env.DB.prepare("SELECT * FROM places WHERE id = ? AND owner_id = ?")
+    .bind(id, user.id)
     .first<PlaceRow>();
   return c.json(row, 201);
 });
 
 app.delete("/api/places/:id", async (c) => {
-  await c.env.DB.prepare("DELETE FROM places WHERE id = ?").bind(c.req.param("id")).run();
+  const user = await currentUser(c);
+  if (!user) return c.json({ error: "Sign in" }, 401);
+  await c.env.DB.prepare("DELETE FROM places WHERE id = ? AND owner_id = ?")
+    .bind(c.req.param("id"), user.id)
+    .run();
   return c.json({ ok: true });
 });
 

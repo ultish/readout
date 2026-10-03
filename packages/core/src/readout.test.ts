@@ -6,11 +6,11 @@ import {
   englishCity,
   municipalityScore,
 } from "./geocode.js";
-import { depthFromRgba, flagFromAlpha } from "./flood.js";
+import { depthFromRgba, flagFromAlpha, flagFromRgba, nearestZoneClass } from "./flood.js";
 import { parseLatLon } from "./place.js";
 import { formatQuakeProbability } from "./quake.js";
 import { soilEnglish } from "./soil.js";
-import { tilePixel, tileUrl } from "./tiles.js";
+import { metersPerPixel, rasterTileZoom, sampleZooms, tileAncestor, tilePixel, tileUrl } from "./tiles.js";
 import { FLOOD_L2 } from "./sources.js";
 
 describe("tilePixel", () => {
@@ -44,13 +44,119 @@ describe("depthFromRgba", () => {
   });
 });
 
+describe("tileAncestor", () => {
+  it("names the quadrant a fine tile occupies in its parent", () => {
+    expect(tileAncestor(16, 5, 7, 14)).toEqual({
+      z: 14,
+      x: 1,
+      y: 1,
+      span: 64,
+      localX: 1,
+      localY: 3,
+    });
+  });
+});
+
+describe("rasterTileZoom", () => {
+  it("follows the 256px raster MapLibre draws for the camera zoom", () => {
+    expect(rasterTileZoom(14)).toBe(15);
+    expect(rasterTileZoom(14.4)).toBe(15);
+    expect(rasterTileZoom(14.6)).toBe(16);
+    expect(rasterTileZoom(16)).toBe(17);
+    expect(rasterTileZoom(20)).toBe(17);
+    expect(rasterTileZoom(0)).toBe(8);
+  });
+});
+
+describe("sampleZooms", () => {
+  it("starts at the tile on screen and walks coarser only", () => {
+    expect(sampleZooms(15)).toEqual([15, 14, 13, 12, 11, 10, 9, 8]);
+    expect(sampleZooms(17)).toEqual([17, 16, 15, 14, 13, 12, 11, 10, 9, 8]);
+  });
+});
+
+describe("metersPerPixel", () => {
+  it("matches the mercator scale at the Yokohama steep-slope tile", () => {
+    expect(metersPerPixel(35.33928, 15)).toBeCloseTo(3.897, 2);
+  });
+});
+
+describe("nearestZoneClass", () => {
+  it("picks the closest legend fill and skips the blue border", () => {
+    const pixels = new Map<string, { r: number; g: number; b: number; a: number }>([
+      ["1,0", { r: 0, g: 0, b: 132, a: 255 }],
+      ["3,4", { r: 250, g: 40, b: 0, a: 255 }],
+      ["10,0", { r: 250, g: 230, b: 0, a: 255 }],
+    ]);
+    const found = nearestZoneClass(
+      (dx, dy) => pixels.get(`${dx},${dy}`) ?? null,
+      12,
+      "steep",
+    );
+    expect(found).toEqual({ zoneClass: "special", dx: 3, dy: 4 });
+  });
+
+  it("ignores a fill past the radius", () => {
+    const found = nearestZoneClass(
+      (dx, dy) => (dx === 8 && dy === 0 ? { r: 250, g: 40, b: 0, a: 255 } : null),
+      5,
+      "steep",
+    );
+    expect(found).toBeNull();
+  });
+});
+
 describe("flagFromAlpha", () => {
   it("says no tile when the zoom stack never returned one", () => {
     expect(flagFromAlpha(null).status).toBe("no_data");
+    expect(flagFromAlpha(null).zoneClass).toBeNull();
   });
 
   it("marks an opaque caution-zone pixel as inside", () => {
     expect(flagFromAlpha(255).inZone).toBe(true);
+  });
+});
+
+describe("flagFromRgba", () => {
+  it("reads the Atami debris yellow as caution and the steep red as special caution", () => {
+    expect(flagFromRgba(230, 200, 50, 255, "debris")).toMatchObject({
+      inZone: true,
+      zoneClass: "caution",
+      label: "Caution",
+    });
+    expect(flagFromRgba(250, 40, 0, 255, "steep")).toMatchObject({
+      inZone: true,
+      zoneClass: "special",
+      label: "Special caution",
+    });
+  });
+
+  it("reads a blended Tokyo steep edge as special caution", () => {
+    expect(flagFromRgba(251, 61, 0, 255, "steep").zoneClass).toBe("special");
+  });
+
+  it("keeps designated and planned fills distinct", () => {
+    expect(flagFromRgba(165, 0, 33, 255, "debris").zoneClass).toBe("special");
+    expect(flagFromRgba(183, 51, 77, 255, "debris").zoneClass).toBe("planned_special");
+    expect(flagFromRgba(255, 153, 0, 255, "slide").zoneClass).toBe("caution");
+    expect(flagFromRgba(255, 173, 51, 255, "slide").zoneClass).toBe("planned_caution");
+  });
+
+  it("does not invent a class for a blend that sits between swatches", () => {
+    const reading = flagFromRgba(250, 166, 0, 255, "steep");
+    expect(reading.inZone).toBe(true);
+    expect(reading.zoneClass).toBeNull();
+  });
+
+  it("does not treat the blue legend border as a class", () => {
+    const reading = flagFromRgba(0, 0, 132, 255, "steep");
+    expect(reading.inZone).toBe(true);
+    expect(reading.zoneClass).toBeNull();
+  });
+
+  it("keeps a clear pixel out of the zone", () => {
+    expect(flagFromRgba(230, 200, 50, 0, "debris").inZone).toBe(false);
+    expect(flagFromRgba(230, 200, 50, 0, "debris").zoneClass).toBeNull();
   });
 });
 

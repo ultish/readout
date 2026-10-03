@@ -1,9 +1,11 @@
 import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
+import { messages, type Lang } from "./copy";
 
 const SEEN = "readout-tour-seen";
 
-export function startTour() {
+export function startTour(lang: Lang) {
+  const t = messages(lang);
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const tour = driver({
     animate: !reduce,
@@ -12,43 +14,39 @@ export function startTour() {
     stagePadding: 6,
     stageRadius: 0,
     popoverClass: "readout-tour",
-    nextBtnText: "Next",
-    prevBtnText: "Back",
-    doneBtnText: "Done",
+    nextBtnText: t.next,
+    prevBtnText: t.back,
+    doneBtnText: t.done,
     disableActiveInteraction: true,
     steps: [
       {
         element: "#address-search",
         popover: {
-          title: "Find a town",
-          description:
-            "Type a city such as Sapporo or 札幌, a Japanese address, or coordinates. One match moves the map there. Click the map to pick the exact spot.",
+          title: t.tourSearchTitle,
+          description: t.tourSearch,
           side: "bottom",
         },
       },
       {
         element: "#map-layers",
         popover: {
-          title: "The colours are published zones",
-          description:
-            "Flood is the assumed-maximum depth. Quake is the 30-year chance of shaking intensity 6-lower or higher. Tsunami and landslide stay off until you turn them on.",
+          title: t.tourLayersTitle,
+          description: t.tourLayers,
           side: "bottom",
           align: "end",
         },
       },
       {
         popover: {
-          title: "Click a spot",
-          description:
-            "The panel lists flood depth, the quake percentage, tsunami, landslide, and the ground type for that point. Red text means the point sits inside a published zone.",
+          title: t.tourClickTitle,
+          description: t.tourClick,
         },
       },
       {
         element: "#saved-places",
         popover: {
-          title: "Keep a shortlist",
-          description:
-            "Save place stores that readout on this machine. Saved opens the list so you can jump back.",
+          title: t.tourSavedTitle,
+          description: t.tourSaved,
           side: "bottom",
           align: "end",
         },
@@ -58,12 +56,12 @@ export function startTour() {
   tour.drive();
 }
 
-export function startTourIfNew() {
+export function startTourIfNew(lang: Lang) {
   try {
     if (localStorage.getItem(SEEN)) return;
     localStorage.setItem(SEEN, "1");
   } catch {
     return;
   }
-  startTour();
+  startTour(lang);
 }

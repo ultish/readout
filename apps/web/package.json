@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@readout/core": "workspace:*",
+    "@simplewebauthn/browser": "^14.0.0",
     "driver.js": "^1.8.0",
     "maplibre-gl": "^5.6.1",
     "react": "^19.0.0",
